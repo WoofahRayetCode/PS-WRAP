@@ -129,15 +129,23 @@ Item {
         noteSessionStart();
         updateSeparateMenuGeometry();
         updateOverlayInteractionActive();
+        overlayGeometryReady = true;
+        scheduleOverlayGeometryUpdate();
         Chiaki.window.setStatsOverlayActive(streamStatsVisible && useSeparateMenuWindow);   // PS-WRAP: widget แยกเฉพาะ OpenGL — Vulkan วาด StatsOverlay inline
     }
     onStreamStatsVisibleChanged: {
         if (Chiaki.window)
             Chiaki.window.setStatsOverlayActive(streamStatsVisible && useSeparateMenuWindow);
     }
-    onWidthChanged: updateSeparateMenuGeometry()
-    onHeightChanged: updateSeparateMenuGeometry()
-    onUseSeparateMenuWindowChanged: { updateSeparateMenuGeometry(); if (Chiaki.window) Chiaki.window.setStatsOverlayActive(streamStatsVisible && useSeparateMenuWindow); }
+    onWidthChanged: { updateSeparateMenuGeometry(); scheduleOverlayGeometryUpdate(); }
+    onHeightChanged: { updateSeparateMenuGeometry(); scheduleOverlayGeometryUpdate(); }
+    onXChanged: scheduleOverlayGeometryUpdate()
+    onYChanged: scheduleOverlayGeometryUpdate()
+    onUseSeparateMenuWindowChanged: {
+        updateSeparateMenuGeometry();
+        if (Chiaki.window) Chiaki.window.setStatsOverlayActive(streamStatsVisible && useSeparateMenuWindow);
+        scheduleOverlayGeometryUpdate();
+    }
 
     Connections {
         target: view.hostWindow
@@ -704,21 +712,67 @@ Item {
     function overlayClicked(which) { if (!pressWasFocusClick) editOverlay(which) }
     // ส่งพื้นที่ overlay ให้ C++ — เมาส์ในกรอบนี้ไป QML ไม่เข้าเกม (คลิกเข้าโหมดแก้ได้ระหว่างเล่น)
     function rectOf(item) { return item.visible ? Qt.rect(item.x, item.y, item.width, item.height) : Qt.rect(0, 0, 0, 0) }
+    readonly property var baseOverlayRects: [
+        rectOf(overlayFrame), rectOf(camFrame), rectOf(statsFrame), rectOf(micFrame), rectOf(clockFrame),
+        rectOf(chatFrame), rectOf(root.recordingToast), rectOf(dockEditor), rectOf(statusBar)
+    ]
+    // Keep rectangle snapshots so the last sent geometry doesn't follow live QML properties.
+    readonly property var linkOverlayRects: [
+        linkCard.visible
+            ? Qt.rect(linkCard.x, linkCard.y, linkCard.width * linkCard.scale, linkCard.height * linkCard.scale)
+            : Qt.rect(0, 0, 0, 0),
+        facecams.visible
+            ? Qt.rect(facecams.x, facecams.y + facecams.height * (1 - facecams.scale),
+                      facecams.width * facecams.scale, facecams.height * facecams.scale)
+            : Qt.rect(0, 0, 0, 0)
+    ]
+    readonly property bool sharingOverlays: !!Chiaki.window && Chiaki.window.shareOverlays
+    property bool overlayGeometryReady: false
+    property var lastHitRects: null
+    property var lastHiddenRects: null
+    property var lastCaptureViewSize: null
+    property var lastVerticalCamRect: null
+    onBaseOverlayRectsChanged: scheduleOverlayGeometryUpdate()
+    onLinkOverlayRectsChanged: scheduleOverlayGeometryUpdate()
+    onSharingOverlaysChanged: scheduleOverlayGeometryUpdate()
+
+    function scheduleOverlayGeometryUpdate() {
+        if (overlayGeometryReady)
+            Qt.callLater(pushOverlayHitRects);
+    }
+
+    function sameRect(a, b) {
+        return a && b && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+    }
+
+    function sameRects(a, b) {
+        return a && b && a.length === b.length && a.every((rect, index) => sameRect(rect, b[index]));
+    }
+
     function pushOverlayHitRects() {
-        if (!Chiaki.window) return;
-        // PS-WRAP Link: ป้ายย่อขยายด้วย scale (มุมซ้ายบนคงที่) → กรอบจริง = ขนาด × scale · ปุ่ม "Give controller" คลิกได้
-        const linkRect = linkCard.visible ? Qt.rect(linkCard.x, linkCard.y, linkCard.width * linkCard.scale, linkCard.height * linkCard.scale) : Qt.rect(0, 0, 0, 0);
-        // facecam: ย่อขยายจากมุมซ้ายล่าง → กรอบจริงเลื่อนขึ้นตาม scale
-        const camsRect = facecams.visible ? Qt.rect(facecams.x, facecams.y + facecams.height * (1 - facecams.scale), facecams.width * facecams.scale, facecams.height * facecams.scale) : Qt.rect(0, 0, 0, 0);
-        Chiaki.window.setOverlayHitRects(useSeparateMenuWindow ? [] : [rectOf(overlayFrame), rectOf(camFrame), rectOf(statsFrame), rectOf(micFrame), rectOf(clockFrame), rectOf(chatFrame), rectOf(root.recordingToast), rectOf(dockEditor), rectOf(statusBar), linkRect, camsRect]);
-        // PS-WRAP: ปิด "ส่ง overlay ของฉัน" (แถบสถานะ) → กรอบเหล่านี้ไม่ติดไปในภาพของเพื่อน/คลิป/Go Live
-        // ป้าย Link, facecam เพื่อน, หัวใจ ไม่อยู่ในรายการ = ยังส่งเสมอ
-        Chiaki.window.setCaptureHideRects(Chiaki.window.shareOverlays ? [] :
-            [rectOf(overlayFrame), rectOf(camFrame), rectOf(statsFrame), rectOf(micFrame), rectOf(clockFrame), rectOf(chatFrame),
-             rectOf(root.recordingToast), rectOf(dockEditor), rectOf(statusBar)], view.width, view.height);
-        // PS-WRAP: กรอบ facecam ให้ภาพแนวตั้ง 9:16 (ตำแหน่งในหน้าต่าง — ตัดส่วนเดียวกันจาก overlay)
+        if (!overlayGeometryReady || !Chiaki.window)
+            return;
+
+        const hitRects = useSeparateMenuWindow ? [] : baseOverlayRects.concat(linkOverlayRects);
+        if (!sameRects(lastHitRects, hitRects)) {
+            Chiaki.window.setOverlayHitRects(hitRects);
+            lastHitRects = hitRects;
+        }
+
+        // Link labels and friends' facecams remain visible in the capture.
+        const hiddenRects = sharingOverlays ? [] : baseOverlayRects;
+        if (!sameRects(lastHiddenRects, hiddenRects) || !lastCaptureViewSize
+                || lastCaptureViewSize.width !== width || lastCaptureViewSize.height !== height) {
+            Chiaki.window.setCaptureHideRects(hiddenRects, width, height);
+            lastHiddenRects = hiddenRects;
+            lastCaptureViewSize = Qt.size(width, height);
+        }
+
         const cam = camFrame.visible ? camFrame.mapToItem(null, 0, 0, camFrame.width, camFrame.height) : Qt.rect(0, 0, 0, 0);
-        Chiaki.window.setVerticalCamRect(cam.x, cam.y, cam.width, cam.height);
+        if (!sameRect(lastVerticalCamRect, cam)) {
+            Chiaki.window.setVerticalCamRect(cam.x, cam.y, cam.width, cam.height);
+            lastVerticalCamRect = cam;
+        }
     }
     // PS-WRAP: Lightbar halo — แสงเรืองด้านในขอบภาพเกมตามสีไฟจอยที่เครื่องสั่ง (อยู่ใต้ overlay อื่นทั้งหมด)
     // สีเปลี่ยน = กระพริบสว่างขึ้นแวบหนึ่ง ให้เห็นว่าเกมเปลี่ยนสถานะ (เช่น เลือดน้อย / โดนตำรวจไล่)
@@ -778,8 +832,15 @@ Item {
             }
         }
     }
-    Timer { interval: 200; repeat: true; running: !!Chiaki.session; onTriggered: view.pushOverlayHitRects() }
-    Component.onDestruction: { if (Chiaki.window) Chiaki.window.setOverlayHitRects([]); root.toastBottomInset = 0; }
+    Component.onDestruction: {
+        overlayGeometryReady = false;
+        if (Chiaki.window) {
+            Chiaki.window.setOverlayHitRects([]);
+            Chiaki.window.setCaptureHideRects([], 0, 0);
+            Chiaki.window.setVerticalCamRect(0, 0, 0, 0);
+        }
+        root.toastBottomInset = 0;
+    }
     // คลิกที่ว่างระหว่างแก้ → จบ (อยู่ใต้ overlay ทั้งหมด)
     Rectangle {
         z: 70
@@ -2604,10 +2665,6 @@ Item {
         x: videoX + 24
         y: videoY + videoH - height - 24
         visible: shown.length > 0 && !!Chiaki.link && Chiaki.link.active && !!Chiaki.session && !sessionLoading && !sessionError
-        onVisibleChanged: view.pushOverlayHitRects()
-        onWidthChanged: view.pushOverlayHitRects()
-        onXChanged: view.pushOverlayHitRects()
-        onYChanged: view.pushOverlayHitRects()
     }
 
     LinkOverlay {
@@ -2645,11 +2702,6 @@ Item {
         visible: !useSeparateMenuWindow && !!Chiaki.link && Chiaki.link.active && !!Chiaki.session
                  && !sessionLoading && !sessionError && !(menuController.open || menuController.closing)
         // กรอบเปลี่ยน (โผล่/ซ่อน/มีคนขอจอยแล้วสูงขึ้น/หน้าต่างย่อขยาย) → แจ้ง C++ ให้เมาส์ในกรอบมาที่ QML
-        onVisibleChanged: view.pushOverlayHitRects()
-        onHeightChanged: view.pushOverlayHitRects()
-        onScaleChanged: view.pushOverlayHitRects()
-        onXChanged: view.pushOverlayHitRects()
-        onYChanged: view.pushOverlayHitRects()
     }
     // Ctrl+Shift+G ให้จอยคนที่ขอ · Ctrl+Shift+U ดึงจอยคืน (ใช้ได้แม้ป้ายถูกซ่อน)
     Shortcut {

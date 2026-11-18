@@ -172,6 +172,55 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stop_pipe_select_single(ChiakiStopPipe *sto
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_stop_pipe_connect(ChiakiStopPipe *stop_pipe, chiaki_socket_t fd, struct sockaddr *addr, size_t addrlen, uint64_t timeout_ms)
 {
+#ifdef _WIN32
+	// FD_CONNECT reports both successful and failed nonblocking connections.
+	WSAEVENT connected = WSACreateEvent();
+	if(connected == WSA_INVALID_EVENT)
+		return CHIAKI_ERR_UNKNOWN;
+	if(WSAEventSelect(fd, connected, FD_CONNECT) == SOCKET_ERROR)
+	{
+		WSACloseEvent(connected);
+		return CHIAKI_ERR_UNKNOWN;
+	}
+
+	int r = connect(fd, addr, (socklen_t)addrlen);
+	int socket_error = r == SOCKET_ERROR ? WSAGetLastError() : 0;
+	ChiakiErrorCode result = CHIAKI_ERR_UNKNOWN;
+	if(socket_error == WSAEWOULDBLOCK)
+	{
+		WSAEVENT events[] = {stop_pipe->event, connected};
+		DWORD ready = WSAWaitForMultipleEvents(2, events, FALSE,
+				timeout_ms >= WSA_INFINITE ? WSA_INFINITE : (DWORD)timeout_ms, FALSE);
+		if(ready == WSA_WAIT_EVENT_0)
+			result = CHIAKI_ERR_CANCELED;
+		else if(ready == WSA_WAIT_TIMEOUT)
+			result = CHIAKI_ERR_TIMEOUT;
+		else if(ready == WSA_WAIT_EVENT_0 + 1)
+		{
+			WSANETWORKEVENTS network_events;
+			if(WSAEnumNetworkEvents(fd, connected, &network_events) == 0 && (network_events.lNetworkEvents & FD_CONNECT))
+				socket_error = network_events.iErrorCode[FD_CONNECT_BIT];
+		}
+	}
+	WSAEventSelect(fd, NULL, 0);
+	WSACloseEvent(connected);
+
+	switch(socket_error)
+	{
+		case 0:
+			return CHIAKI_ERR_SUCCESS;
+		case WSAETIMEDOUT:
+			return CHIAKI_ERR_TIMEOUT;
+		case WSAECONNREFUSED:
+			return CHIAKI_ERR_CONNECTION_REFUSED;
+		case WSAEHOSTDOWN:
+			return CHIAKI_ERR_HOST_DOWN;
+		case WSAEHOSTUNREACH:
+			return CHIAKI_ERR_HOST_UNREACH;
+		default:
+			return result;
+	}
+#else
 	int r = connect(fd, addr, (socklen_t)addrlen);
 	if(r >= 0)
 		return CHIAKI_ERR_SUCCESS;
@@ -184,18 +233,10 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stop_pipe_connect(ChiakiStopPipe *stop_pipe
 	}
 	else
 	{
-#ifdef _WIN32
-		int err = WSAGetLastError();
-		if(err == WSAECONNREFUSED)
-			return CHIAKI_ERR_CONNECTION_REFUSED;
-		else
-			return CHIAKI_ERR_NETWORK;
-#else
 		if(errno == ECONNREFUSED)
 			return CHIAKI_ERR_CONNECTION_REFUSED;
 		else
 			return CHIAKI_ERR_NETWORK;
-#endif
 	}
 
 	struct sockaddr_storage peer;
@@ -203,42 +244,13 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stop_pipe_connect(ChiakiStopPipe *stop_pipe
 	if(getpeername(fd, (struct sockaddr *)(&peer), &peerlen) == 0)
 		return CHIAKI_ERR_SUCCESS;
 
-#ifdef _WIN32
-	int err = WSAGetLastError();
-	if(err != WSAENOTCONN)
-		return CHIAKI_ERR_UNKNOWN;
-#else
 	if(errno != ENOTCONN)
 		return CHIAKI_ERR_UNKNOWN;
-#endif
 
-#ifdef _WIN32
-	int sockerr;
-	socklen_t sockerr_sz = sizeof(sockerr);
-	if(getsockopt(fd, SOL_SOCKET, SO_ERROR, (char*)(&sockerr), &sockerr_sz) < 0)
-		return CHIAKI_ERR_UNKNOWN;
-#else
 	int sockerr;
 	socklen_t sockerr_sz = sizeof(sockerr);
 	if(getsockopt(fd, SOL_SOCKET, SO_ERROR, &sockerr, &sockerr_sz) < 0)
 		return CHIAKI_ERR_UNKNOWN;
-#endif
-
-#ifdef _WIN32
-	switch(sockerr)
-	{
-		case WSAETIMEDOUT:
-			return CHIAKI_ERR_TIMEOUT;
-		case WSAECONNREFUSED:
-			return CHIAKI_ERR_CONNECTION_REFUSED;
-		case WSAEHOSTDOWN:
-			return CHIAKI_ERR_HOST_DOWN;
-		case WSAEHOSTUNREACH:
-			return CHIAKI_ERR_HOST_UNREACH;
-		default:
-			return CHIAKI_ERR_UNKNOWN;
-	}
-#else
 	switch(sockerr)
 	{
 		case ETIMEDOUT:

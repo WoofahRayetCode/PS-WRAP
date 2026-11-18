@@ -22,6 +22,7 @@ typedef struct chiaki_packet_stats_t
 	ChiakiSeqNum16 seq_min; // sequence number that was max at the last reset
 	ChiakiSeqNum16 seq_max; // currently maximal sequence number
 	uint64_t seq_received; // total received packets since the last reset
+	bool seq_initialized;
 } ChiakiPacketStats;
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_packet_stats_init(ChiakiPacketStats *stats);

@@ -16,6 +16,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_packet_stats_init(ChiakiPacketStats *stats)
 	stats->seq_min = 0;
 	stats->seq_max = 0;
 	stats->seq_received = 0;
+	stats->seq_initialized = false;
 	err = chiaki_mutex_unlock(&stats->mutex);
 	return err;
 }
@@ -50,9 +51,19 @@ CHIAKI_EXPORT void chiaki_packet_stats_push_generation(ChiakiPacketStats *stats,
 
 CHIAKI_EXPORT void chiaki_packet_stats_push_seq(ChiakiPacketStats *stats, ChiakiSeqNum16 seq_num)
 {
-	stats->seq_received++;
-	if(chiaki_seq_num_16_gt(seq_num, stats->seq_max))
-		stats->seq_max = seq_num;
+	chiaki_mutex_lock(&stats->mutex);
+	if(!stats->seq_initialized)
+	{
+		stats->seq_min = stats->seq_max = (ChiakiSeqNum16)(seq_num - 1);
+		stats->seq_initialized = true;
+	}
+	if(chiaki_seq_num_16_gt(seq_num, stats->seq_min))
+	{
+		stats->seq_received++;
+		if(chiaki_seq_num_16_gt(seq_num, stats->seq_max))
+			stats->seq_max = seq_num;
+	}
+	chiaki_mutex_unlock(&stats->mutex);
 }
 
 CHIAKI_EXPORT void chiaki_packet_stats_get(ChiakiPacketStats *stats, bool reset, uint64_t *received, uint64_t *lost)
@@ -68,8 +79,9 @@ CHIAKI_EXPORT void chiaki_packet_stats_get(ChiakiPacketStats *stats, bool reset,
 	//		(unsigned long long)stats->gen_lost);
 
 	// seq
-	uint64_t seq_diff = stats->seq_max - stats->seq_min; // overflow on purpose if max < min
-	uint64_t seq_lost = stats->seq_received > seq_diff ? seq_diff : seq_diff - stats->seq_received;
+	// Wrap at the sequence number width before widening to the reported total.
+	uint64_t seq_diff = (ChiakiSeqNum16)(stats->seq_max - stats->seq_min);
+	uint64_t seq_lost = stats->seq_received >= seq_diff ? 0 : seq_diff - stats->seq_received;
 	*received += stats->seq_received;
 	*lost += seq_lost;
 

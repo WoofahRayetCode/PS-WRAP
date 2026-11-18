@@ -40,7 +40,8 @@
 // DualSense touchpad is 1919 x 1079
 #define PS5_TOUCHPAD_MAX_X 1919.0f
 #define PS5_TOUCHPAD_MAX_Y 1079.0f
-#define SESSION_RETRY_SECONDS 20
+static constexpr qint64 SESSION_STARTUP_WINDOW_MS = 20000;
+static constexpr int SESSION_RETRY_DELAY_MS = 1000;
 #define HAPTIC_RUMBLE_MIN_STRENGTH 100
 
 #define MICROPHONE_SAMPLES 480
@@ -468,11 +469,8 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	mouse_touch_enabled = connect_info.mouse_touch_enabled;
 	keyboard_controller_enabled = connect_info.keyboard_controller_enabled;
 	host = connect_info.host;
-	QByteArray host_str = connect_info.host.toUtf8();
-
-	ChiakiConnectInfo chiaki_connect_info = {};
+	auto &chiaki_connect_info = native_connect_info;
 	chiaki_connect_info.ps5 = chiaki_target_is_ps5(connect_info.target);
-	chiaki_connect_info.host = host_str.constData();
 	chiaki_connect_info.video_profile = connect_info.video_profile;
 	chiaki_connect_info.video_profile_auto_downgrade = true;
 	chiaki_connect_info.enable_keyboard = false;
@@ -555,47 +553,16 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
         }
         memcpy(chiaki_connect_info.psn_account_id, psn_account_id.constData(), CHIAKI_PSN_ACCOUNT_ID_SIZE);
 	}
-	err = chiaki_session_init(&session, &chiaki_connect_info, GetChiakiLog());
+	err = InitializeNativeSession();
 	if(err != CHIAKI_ERR_SUCCESS)
 		throw ChiakiException("Chiaki Session Init failed: " + QString::fromLocal8Bit(chiaki_error_string(err)));
-	ChiakiCtrlDisplaySink display_sink;
-	display_sink.user = this;
-	display_sink.cantdisplay_cb = CantDisplayCb;
-	chiaki_session_ctrl_set_display_sink(&session, &display_sink);
-	chiaki_opus_decoder_set_cb(&opus_decoder, AudioSettingsCb, AudioFrameCb, this);
-	ChiakiAudioSink audio_sink;
-	chiaki_opus_decoder_get_sink(&opus_decoder, &audio_sink);
-	chiaki_session_set_audio_sink(&session, &audio_sink);
-	ChiakiAudioHeader audio_header;
-	chiaki_audio_header_set(&audio_header, 2, 16, MICROPHONE_SAMPLES * 100, MICROPHONE_SAMPLES);
-	chiaki_opus_encoder_header(&audio_header, &opus_encoder, &session);
 
-	if (connect_info.enable_dualsense)
-	{
-		ChiakiAudioSink haptics_sink;
-		haptics_sink.user = this;
-		haptics_sink.frame_cb = HapticsFrameCb;
-		chiaki_session_set_haptics_sink(&session, &haptics_sink);
-	}
 #if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
 	if (connect_info.enable_steamdeck_haptics)
 		enable_steamdeck_haptics = true;
 	else
 		enable_steamdeck_haptics = false;
 #endif
-#if CHIAKI_LIB_ENABLE_PI_DECODER
-	if(pi_decoder)
-		chiaki_session_set_video_sample_cb(&session, chiaki_pi_decoder_video_sample_cb, pi_decoder);
-	else
-	{
-#endif
-		chiaki_session_set_video_sample_cb(&session, chiaki_ffmpeg_decoder_video_sample_cb, ffmpeg_decoder);
-#if CHIAKI_LIB_ENABLE_PI_DECODER
-	}
-#endif
-
-	chiaki_session_set_event_cb(&session, EventCb, this);
-
 #if CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	connect(ControllerManager::GetInstance(), &ControllerManager::AvailableControllersUpdated, this, &StreamSession::UpdateGamepads);
 	connect(this, &StreamSession::DualSenseIntensityChanged, ControllerManager::GetInstance(), &ControllerManager::SetDualSenseIntensity);
@@ -703,6 +670,47 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	StartAudioOutDrainThread();
 }
 
+ChiakiErrorCode StreamSession::InitializeNativeSession()
+{
+	const QByteArray host_bytes = host.toUtf8();
+	ChiakiConnectInfo info = native_connect_info;
+	info.host = host_bytes.constData();
+	const ChiakiErrorCode err = chiaki_session_init(&session, &info, GetChiakiLog());
+	session_initialized = err == CHIAKI_ERR_SUCCESS;
+	if(!session_initialized)
+		return err;
+
+	ChiakiCtrlDisplaySink display_sink{};
+	display_sink.user = this;
+	display_sink.cantdisplay_cb = CantDisplayCb;
+	chiaki_session_ctrl_set_display_sink(&session, &display_sink);
+
+	chiaki_opus_decoder_set_cb(&opus_decoder, AudioSettingsCb, AudioFrameCb, this);
+	ChiakiAudioSink audio_sink{};
+	chiaki_opus_decoder_get_sink(&opus_decoder, &audio_sink);
+	chiaki_session_set_audio_sink(&session, &audio_sink);
+	ChiakiAudioHeader audio_header;
+	chiaki_audio_header_set(&audio_header, 2, 16, MICROPHONE_SAMPLES * 100, MICROPHONE_SAMPLES);
+	chiaki_opus_encoder_header(&audio_header, &opus_encoder, &session);
+
+	if(info.enable_dualsense)
+	{
+		ChiakiAudioSink haptics_sink{};
+		haptics_sink.user = this;
+		haptics_sink.frame_cb = HapticsFrameCb;
+		chiaki_session_set_haptics_sink(&session, &haptics_sink);
+	}
+#if CHIAKI_LIB_ENABLE_PI_DECODER
+	if(pi_decoder)
+		chiaki_session_set_video_sample_cb(&session, chiaki_pi_decoder_video_sample_cb, pi_decoder);
+	else
+#endif
+		chiaki_session_set_video_sample_cb(&session, chiaki_ffmpeg_decoder_video_sample_cb, ffmpeg_decoder);
+
+	chiaki_session_set_event_cb(&session, EventCb, this);
+	return CHIAKI_ERR_SUCCESS;
+}
+
 StreamSession::~StreamSession()
 {
 	mic_active.storeRelaxed(false);
@@ -730,7 +738,8 @@ StreamSession::~StreamSession()
 
 	if(session_started)
 		chiaki_session_join(&session);
-	chiaki_session_fini(&session);
+	if(session_initialized)
+		chiaki_session_fini(&session);
 	chiaki_opus_decoder_fini(&opus_decoder);
 	chiaki_opus_encoder_fini(&opus_encoder);
 #if CHIAKI_GUI_ENABLE_SPEEX
@@ -802,8 +811,14 @@ StreamSession::~StreamSession()
 
 void StreamSession::Start()
 {
-	if(!connect_timer.isValid())
+	if(session_started || retry_pending || stop_requested || quit_reported)
+		return;
+	if(!startup_started_us)
+	{
+		startup_started_us = chiaki_time_now_monotonic_us();
 		connect_timer.start();
+	}
+	CHIAKI_LOGI(GetChiakiLog(), "Session startup: starting attempt %d", retry_used ? 2 : 1);
 	ChiakiErrorCode err = chiaki_session_start(&session);
 	if(err != CHIAKI_ERR_SUCCESS)
 	{
@@ -815,7 +830,24 @@ void StreamSession::Start()
 void StreamSession::Stop()
 {
 	mic_active.storeRelaxed(false);
-	chiaki_session_stop(&session);
+	if(stop_requested || quit_reported)
+		return;
+	// PSN connection setup still owns the session until its worker reports completion.
+	if(!session_started && holepunch_session)
+	{
+		chiaki_session_stop(&session);
+		return;
+	}
+	stop_requested = true;
+	if(!session_started)
+	{
+		retry_pending = false;
+		QMetaObject::invokeMethod(this, [this] {
+			FinishSession(CHIAKI_QUIT_REASON_STOPPED, {});
+		}, Qt::QueuedConnection);
+	}
+	else
+		chiaki_session_stop(&session);
 }
 
 void StreamSession::GoToBed()
@@ -2420,24 +2452,92 @@ void StreamSession::PushHapticsFrame(uint8_t *buf, size_t buf_size)
 	}
 }
 
+void StreamSession::HandleSessionQuit(ChiakiQuitReason reason, const QString &detail)
+{
+	const bool transient = reason == CHIAKI_QUIT_REASON_SESSION_REQUEST_CONNECTION_REFUSED
+		|| reason == CHIAKI_QUIT_REASON_CTRL_CONNECT_FAILED
+		|| reason == CHIAKI_QUIT_REASON_CTRL_CONNECTION_REFUSED;
+	if(!stop_requested && !retry_used && !connected && !holepunch_session && transient
+		&& connect_timer.isValid() && connect_timer.elapsed() < SESSION_STARTUP_WINDOW_MS - SESSION_RETRY_DELAY_MS)
+	{
+		if(chiaki_session_join(&session) != CHIAKI_ERR_SUCCESS)
+		{
+			FinishSession(reason, detail);
+			return;
+		}
+		session_started = false;
+		retry_used = true;
+		retry_pending = true;
+		CHIAKI_LOGI(GetChiakiLog(), "Session startup: retrying direct connection in %d ms", SESSION_RETRY_DELAY_MS);
+		QTimer::singleShot(SESSION_RETRY_DELAY_MS, Qt::PreciseTimer, this, [this, reason, detail] {
+			if(!retry_pending)
+				return;
+			retry_pending = false;
+			if(connect_timer.elapsed() >= SESSION_STARTUP_WINDOW_MS)
+			{
+				FinishSession(reason, detail);
+				return;
+			}
+			ChiakiControllerState controller_state = session.controller_state;
+			chiaki_session_fini(&session);
+			const ChiakiErrorCode err = InitializeNativeSession();
+			if(err != CHIAKI_ERR_SUCCESS)
+			{
+				FinishSession(reason, tr("Could not initialize the retry: %1").arg(
+					QString::fromLocal8Bit(chiaki_error_string(err))));
+				return;
+			}
+			chiaki_session_set_controller_state(&session, &controller_state);
+			if(connect_timer.elapsed() >= SESSION_STARTUP_WINDOW_MS)
+			{
+				FinishSession(reason, detail);
+				return;
+			}
+			try
+			{
+				Start();
+			}
+			catch(const ChiakiException &e)
+			{
+				FinishSession(reason, QString::fromLocal8Bit(e.what()));
+			}
+		});
+		return;
+	}
+	FinishSession(stop_requested ? CHIAKI_QUIT_REASON_STOPPED : reason, stop_requested ? QString() : detail);
+}
+
+void StreamSession::FinishSession(ChiakiQuitReason reason, const QString &detail)
+{
+	if(quit_reported)
+		return;
+	quit_reported = true;
+	connect_timer.invalidate();
+	connected = false;
+	emit ConnectedChanged();
+	emit SessionQuit(reason, detail);
+}
+
 void StreamSession::Event(ChiakiEvent *event)
 {
 	switch(event->type)
 	{
 		case CHIAKI_EVENT_CONNECTED:
-			connect_timer.invalidate();
-			connected = true;
-			emit ConnectedChanged();
+			CHIAKI_LOGI(GetChiakiLog(), "Session startup: connected after %llu ms",
+				static_cast<unsigned long long>((chiaki_time_now_monotonic_us() - startup_started_us) / 1000));
+			QMetaObject::invokeMethod(this, [this] {
+				if(stop_requested || quit_reported)
+					return;
+				connect_timer.invalidate();
+				connected = true;
+				emit ConnectedChanged();
+			}, Qt::QueuedConnection);
 			break;
 		case CHIAKI_EVENT_QUIT:
-			if(!connected && !holepunch_session && chiaki_quit_reason_is_error(event->quit.reason) && connect_timer.elapsed() < SESSION_RETRY_SECONDS * 1000)
-			{
-				QTimer::singleShot(SESSION_RETRY_SECONDS / 3, this, &StreamSession::Start);
-				return;
-			}
-			connected = false;
-			emit ConnectedChanged();
-			emit SessionQuit(event->quit.reason, event->quit.reason_str ? QString::fromUtf8(event->quit.reason_str) : QString());
+			QMetaObject::invokeMethod(this, [this, reason = event->quit.reason,
+				detail = event->quit.reason_str ? QString::fromUtf8(event->quit.reason_str) : QString()] {
+				HandleSessionQuit(reason, detail);
+			}, Qt::QueuedConnection);
 			break;
 		case CHIAKI_EVENT_REGIST:
 			emit AutoRegistSucceeded(event->host);
@@ -2861,6 +2961,13 @@ ChiakiErrorCode StreamSession::ConnectPsnConnection(QString duid, bool ps5)
 void StreamSession::CancelPsnConnection(bool stop_thread)
 {
 	chiaki_holepunch_main_thread_cancel(holepunch_session, stop_thread);
+}
+
+void StreamSession::LogFirstDecodedFrame()
+{
+	if(startup_started_us && first_frame_logged.testAndSetRelaxed(false, true))
+		CHIAKI_LOGI(GetChiakiLog(), "Session startup: first decoded video frame after %llu ms",
+			static_cast<unsigned long long>((chiaki_time_now_monotonic_us() - startup_started_us) / 1000));
 }
 
 void StreamSession::TriggerFfmpegFrameAvailable()

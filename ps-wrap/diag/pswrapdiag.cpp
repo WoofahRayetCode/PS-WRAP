@@ -219,7 +219,7 @@ static bool DirExists(const wstring &p)
 }
 
 // อ่านไฟล์ (ถ้าใหญ่กว่า max_bytes เอาแค่ท้ายไฟล์)
-static bool ReadFileBytes(const wstring &path, string &out, ULONGLONG max_bytes = 0)
+static bool ReadFileBytes(const wstring &path, string &out, ULONGLONG max_bytes = 0, bool from_end = true)
 {
 	HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
 	if(f == INVALID_HANDLE_VALUE)
@@ -229,9 +229,12 @@ static bool ReadFileBytes(const wstring &path, string &out, ULONGLONG max_bytes 
 	ULONGLONG want = (ULONGLONG)size.QuadPart;
 	if(max_bytes && want > max_bytes)
 	{
-		LARGE_INTEGER off;
-		off.QuadPart = (LONGLONG)(want - max_bytes);
-		SetFilePointerEx(f, off, nullptr, FILE_BEGIN);
+		if(from_end)
+		{
+			LARGE_INTEGER off;
+			off.QuadPart = (LONGLONG)(want - max_bytes);
+			SetFilePointerEx(f, off, nullptr, FILE_BEGIN);
+		}
 		want = max_bytes;
 	}
 	out.resize((size_t)want);
@@ -1119,6 +1122,85 @@ static wstring NvidiaVersion(const wstring &dv)
 	return digits.substr(0, 3) + L"." + digits.substr(3);
 }
 
+static wstring CurrentRenderer();
+
+static void CheckObsCapture(int gpu_count, const wstring &roaming)
+{
+	wstring adapter, method;
+	if(!roaming.empty())
+	{
+		const wstring dir = roaming + L"\\obs-studio\\logs";
+		WIN32_FIND_DATAW fd{};
+		HANDLE files = FindFirstFileW((dir + L"\\*.txt").c_str(), &fd);
+		wstring latest;
+		ULONGLONG last_write = 0;
+		if(files != INVALID_HANDLE_VALUE)
+		{
+			do
+			{
+				const auto modified = FileTimeU64(fd.ftLastWriteTime);
+				if(!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && (latest.empty() || modified > last_write))
+				{
+					latest = dir + L"\\" + fd.cFileName;
+					last_write = modified;
+				}
+			}
+			while(FindNextFileW(files, &fd));
+			FindClose(files);
+		}
+
+		string bytes;
+		if(!latest.empty() && ReadFileBytes(latest, bytes, 1 << 20, false))
+		{
+			const wstring marker = L"Loading up D3D11 on adapter ";
+			for(const auto &line : SplitLines(DecodeText(bytes)))
+			{
+				size_t pos = line.find(marker);
+				if(pos != wstring::npos)
+					adapter = Trim(line.substr(pos + marker.size()));
+			}
+		}
+
+		if(!latest.empty() && ReadFileBytes(latest, bytes, 4 << 20))
+		{
+			bool in_capture_settings = false, pswrap_target = false;
+			for(const auto &line : SplitLines(DecodeText(bytes)))
+			{
+				const size_t separator = line.find(L": ");
+				const wstring message = separator == wstring::npos ? L"" : line.substr(separator + 2);
+				if(!IStarts(message, L"\t"))
+				{
+					in_capture_settings = IStarts(message, L"[window-capture:") && IContains(message, L"update settings:");
+					pswrap_target = false;
+				}
+				else if(in_capture_settings)
+				{
+					const wstring field = Trim(message);
+					if(IStarts(field, L"executable: "))
+						pswrap_target = _wcsicmp(Trim(field.substr(12)).c_str(), L"PS-WRAP.exe") == 0;
+					else if(pswrap_target && IStarts(field, L"method chosen: "))
+					{
+						const wstring chosen = Trim(field.substr(15));
+						method = chosen == L"WGC" ? L"Modern (WGC)" : chosen == L"BitBlt" ? L"Legacy (BitBlt)" : L"";
+					}
+				}
+			}
+		}
+	}
+
+	const wstring renderer = CurrentRenderer() == L"opengl" ? L"OpenGL" : L"Vulkan";
+	AddSection(L"OBS Window Capture",
+		L"PS-WRAP configured renderer: " + renderer +
+		L"\nOBS adapter (latest local log): " + (adapter.empty() ? L"Unknown" : adapter) +
+		L"\nLast PS-WRAP capture method in that log: " + (method.empty() ? L"Unknown" : method) + L"\n");
+	if(method == L"Legacy (BitBlt)")
+		AddFinding(LV_INFO, L"OBS last used Legacy (BitBlt) for PS-WRAP",
+			L"In OBS Window Capture properties, select Modern (WGC) explicitly.");
+	if(gpu_count > 1 && (!adapter.empty() || !method.empty()))
+		AddFinding(LV_INFO, L"OBS Window Capture can behave differently on each GPU",
+			L"If Modern (WGC) shows a frozen desktop or black frame, test OBS on the other GPU in Windows graphics settings and restart OBS.");
+}
+
 static void CheckGpu()
 {
 	wstring b, header;
@@ -1188,6 +1270,7 @@ static void CheckGpu()
 		g_rep.header_gpu = header.empty() ? L"(unknown)" : header;
 	}
 	AddSection(L"Graphics card", b.empty() ? L"(could not read graphics driver info)\n" : b);
+	CheckObsCapture(real_gpus, KnownFolder(FOLDERID_RoamingAppData));
 }
 
 static wstring LastLineStarting(const wstring &text, const wstring &prefix)

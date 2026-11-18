@@ -267,6 +267,8 @@ class StreamSession : public QObject
 		RumbleHapticsIntensity rumble_haptics_intensity;
 		bool start_mic_unmuted;
 		bool session_started;
+		bool session_initialized = false;
+		ChiakiConnectInfo native_connect_info{};
 
 		ChiakiFfmpegDecoder *ffmpeg_decoder;
 		void TriggerFfmpegFrameAvailable();
@@ -327,6 +329,16 @@ class StreamSession : public QObject
 		QAtomicInteger<bool> mic_active = true;
 		QMap<Qt::Key, int> key_map;
 		QElapsedTimer connect_timer;
+		quint64 startup_started_us = 0;
+		QAtomicInteger<bool> first_frame_logged{false};
+		bool retry_pending = false;
+		bool retry_used = false;
+		bool stop_requested = false;
+		bool quit_reported = false;
+
+		ChiakiErrorCode InitializeNativeSession();
+		void HandleSessionQuit(ChiakiQuitReason reason, const QString &detail);
+		void FinishSession(ChiakiQuitReason reason, const QString &detail);
 
 		void StartAudioOutDrainThread();
 		void StopAudioOutDrainThread();
@@ -373,6 +385,7 @@ class StreamSession : public QObject
 
 		void Start();
 		void Stop();
+		void LogFirstDecodedFrame();
 		void GoToBed();
 	Q_INVOKABLE bool RequestIDR();
 		void ToggleMute();

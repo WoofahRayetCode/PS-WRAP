@@ -3,7 +3,16 @@
 English · [ภาษาไทย](README.th.md)
 
 PS-WRAP is a PS4 / PS5 Remote Play client for Windows with a redesigned, modern interface that you can use with a controller alone.
-It is built on [chiaki-ng](https://github.com/streetpea/chiaki-ng) by the BudToZai team. The streaming core (`ps-wrap/lib/`) comes from upstream.
+This fork builds on [PS-WRAP by iDevGIS and the BudToZai team](https://github.com/iDevGIS/PS-WRAP). iDevGIS is the original PS-WRAP developer and maintainer. The Remote Play core comes from [chiaki-ng by Street Pea and contributors](https://github.com/streetpea/chiaki-ng), which builds on [Chiaki by Florian Märkl and contributors](https://git.sr.ht/~thestr4ng3r/chiaki).
+
+## Changes in this fork
+
+Fork changes dated November 18, 2026, based on upstream PS-WRAP v0.14.0.
+
+- **Direct Remote Play connections** retry once after a short delay when a connection is refused or the control connection fails. The retry uses a fresh native session. On Windows, PS-WRAP now detects a refused connection without waiting for the socket timeout.
+- **Connection diagnostics** log the time to connect and decode the first video frame. Packet-loss counters handle sequence numbers wrapping around without reporting a false loss spike.
+- **OBS Window Capture** diagnostics report the configured PS-WRAP renderer and, when available, the GPU and capture method from the latest local OBS log. See [Capture PS-WRAP in OBS Studio](#capture-ps-wrap-in-obs-studio) for hybrid-GPU troubleshooting.
+- **Stream overlays** update their mouse hit areas and capture geometry only when those values change, reducing work during playback.
 
 ▶️ **Demo stream:** [youtube.com/live/8sWkgmj81Aw](https://www.youtube.com/live/8sWkgmj81Aw).
 
@@ -65,6 +74,14 @@ The cards wrap onto a new line on narrow windows instead of being cut off. With 
 ![Picture size](screenshots/picture-size.jpg)
 
 **Size ▾** sets the window so the video area is exactly 720p, 900p, 1080p or 1440p (16:9, no black bars, real pixels even at 150 % display scaling). The **STREAM** tag marks the size that matches the stream resolution, and sizes larger than your screen are hidden.
+
+### Capture PS-WRAP in OBS Studio
+
+Start Remote Play and keep the PS-WRAP window open. In OBS, add a **Window Capture** source, open its **Properties**, and select **[PS-WRAP.exe]: PS-WRAP**. Set **Capture Method** to **Modern (WGC)**, called **Windows 10 (1903 and up)** in older OBS versions. Keep **Client Area** on to crop out the title bar and borders.
+
+**Automatic** can select BitBlt for the PS-WRAP window. BitBlt can show a frozen desktop image or capture OBS itself. Check that the OBS preview shows moving gameplay with OBS in front of PS-WRAP before going live. Keep PS-WRAP restored during capture. If your scene also has a full-screen capture card source, hide it or place it below Window Capture to see the PS-WRAP feed.
+
+If Modern (WGC) also shows a frozen desktop on a dual-GPU PC, test OBS on the other GPU. In Windows **Settings → System → Display → Graphics**, select OBS Studio and choose the other GPU under **Options**, then restart OBS. Test the new setting locally before using it for a broadcast.
 
 ### PS-WRAP Link (beta)
 
@@ -142,12 +159,13 @@ Console PIN with a controller, like the passcode screen on the PS5: each button 
 
 ## Download
 
-Get the latest zip from [Releases](https://github.com/iDevGIS/PS-WRAP/releases), unzip it anywhere and run `PS-WRAP.exe`. You don't need to install anything.
+Prebuilt ZIPs are available from [upstream PS-WRAP Releases](https://github.com/iDevGIS/PS-WRAP/releases). To use the changes listed above, [build this fork from source](#build-windows-msys2-mingw64).
+The in-app updater still points to upstream releases. Applying an in-app update can replace a fork build with an upstream build.
 If you used chiaki-ng on the same PC, PS-WRAP copies its settings and registered consoles on first launch (chiaki-ng's data is left untouched).
 
 ## Best tested settings
 
-These settings gave the sharpest and smoothest picture in our tests: PS5 on ordinary home Wi-Fi 5 (802.11ac, about 1.5 ms ping), NVIDIA RTX 4090, 165 Hz display, playing Ghost of Yōtei. The picture looked sharper than playing on the TV connected to the console.
+The upstream developer tested these settings with a PS5 on home Wi-Fi 5 (802.11ac, about 1.5 ms ping), an NVIDIA RTX 4090 and a 165 Hz display, playing Ghost of Yōtei.
 
 | Setting | Where | Value | Why |
 |---|---|---|---|
@@ -168,7 +186,7 @@ These settings gave the sharpest and smoothest picture in our tests: PS5 on ordi
 
 ## Reporting problems
 
-PS-WRAP is an independent fork, **not an official chiaki-ng release**. Please report PS-WRAP bugs and ideas in this repository's [Issues](https://github.com/iDevGIS/PS-WRAP/issues) or in the **#help** forum on our [Discord](https://discord.gg/6VTSxu8JRf), not to chiaki-ng.
+For issues reproducible on the original build, use [upstream PS-WRAP Issues](https://github.com/iDevGIS/PS-WRAP/issues) or the **#help** forum on the [upstream Discord](https://discord.gg/6VTSxu8JRf). When sharing a diagnostic report from this fork, include the fork commit so readers can identify the build.
 
 **Easiest way: run `PS-WRAP-Diagnostics.exe`** (in the PS-WRAP folder, next to `PS-WRAP.exe`). It works even when PS-WRAP itself won't open:
 
@@ -252,7 +270,7 @@ The report never contains your PSN sign-in, stream keys, console registration or
 ## Build (Windows, MSYS2 mingw64)
 
 ```powershell
-git clone --recurse-submodules https://github.com/iDevGIS/PS-WRAP.git
+git clone --recurse-submodules https://github.com/WoofahRayetCode/PS-WRAP.git
 cd PS-WRAP
 .\scripts\setup-msys2.ps1        # install MSYS2 + dependencies (once)
 .\scripts\setup-extra-deps.ps1   # libplacebo / SDL that must be built from source (once)
@@ -266,8 +284,9 @@ AI facecam features need `onnxruntime.dll` (ONNX Runtime 1.30 win-x64) next to `
 
 ## Credits
 
-PS-WRAP would not exist without these projects. The same credits are shown in the app under the ⓘ **About** chip on the home screen (also in Settings › System).
+PS-WRAP would not exist without these developers and projects. The app also lists upstream and dependency credits under the ⓘ **About** chip.
 
+- **[PS-WRAP](https://github.com/iDevGIS/PS-WRAP)** by **[iDevGIS](https://github.com/iDevGIS)** and the BudToZai team. This fork starts from upstream v0.14.0.
 - **[chiaki-ng](https://github.com/streetpea/chiaki-ng)** by Street Pea and contributors. PS-WRAP forked from commit `a9a2805` (1.10.0 development); the whole Remote Play streaming core is theirs.
 - **[Chiaki](https://git.sr.ht/~thestr4ng3r/chiaki)** by Florian Märkl and contributors, the original that chiaki-ng is based on.
 - Upstream submodules: curl, nanopb, jerasure, gf-complete, munit, cpp-steam-tools, oboe, borealis.
